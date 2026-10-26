@@ -1,0 +1,74 @@
+{
+  "kind": "independent Python audit; not MATLAB execution",
+  "balance": {
+    "ideal_balance_errors": [
+      1.3877787807814457e-17,
+      2.7755575615628914e-17
+    ],
+    "finite_history_proof": false
+  },
+  "data": {
+    "five": {
+      "shape": [
+        100,
+        4
+      ],
+      "valid_points_per_mode": [
+        66,
+        64,
+        77
+      ],
+      "modes": [
+        {
+          "mode": 0,
+          "RMSE_mps": 2.6105249038985196e-13,
+          "max_abs_mps": 5.115907697472721e-13
+        },
+        {
+          "mode": 1,
+          "RMSE_mps": 3.001149491686714e-13,
+          "max_abs_mps": 4.547473508864641e-13
+        },
+        {
+          "mode": 2,
+          "RMSE_mps": 2.7937741865260816e-13,
+          "max_abs_mps": 4.547473508864641e-13
+        }
+      ]
+    },
+    "seven": {
+      "shape": [
+        100,
+        4
+      ],
+      "valid_points_per_mode": [
+        66,
+        69,
+        84
+      ],
+      "modes": [
+        {
+          "mode": 0,
+          "RMSE_mps": 2.810123499372169e-13,
+          "max_abs_mps": 4.547473508864641e-13
+        },
+        {
+          "mode": 1,
+          "RMSE_mps": 2.992261807503739e-13,
+          "max_abs_mps": 4.547473508864641e-13
+        },
+        {
+          "mode": 2,
+          "RMSE_mps": 2.9321036021819984e-13,
+          "max_abs_mps": 4.547473508864641e-13
+        }
+      ]
+    }
+  },
+  "versions": {
+    "python": "3.12.14",
+    "numpy": "2.5.3",
+    "numba": "0.67.0",
+    "disba": "0.7.0"
+  }
+}

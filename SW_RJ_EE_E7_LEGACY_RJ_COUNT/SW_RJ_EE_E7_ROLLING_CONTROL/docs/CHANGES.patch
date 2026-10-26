@@ -1,0 +1,938 @@
+--- baseline/Main_rjmcmc.m
++++ new/Main_rjmcmc.m
+@@ -1,3 +1,5 @@
+-function Main_rjmcmc
+-    Main_rjmcmc_20000(rj_ee_options);
++function result_file=Main_rjmcmc(cfg)
++% Compatibility entry; configuration controls all settings and iteration count.
++    if nargin<1, cfg=rj_ee_options; end
++    result_file=Main_rjmcmc_EE(cfg);
+ end
+--- baseline/Main_rjmcmc_20000.m
++++ new/Main_rjmcmc_20000.m
+@@ -1,376 +1,5 @@
+-function result_file=Main_rjmcmc_20000(run_cfg)
+-%% ========================================================================
+-%% 多模式瑞雷波频散曲线的跨维MCMC反演
+-% 清除工作空间并关闭所有图形
+-close all
+-if nargin<1, run_cfg=rj_ee_options; end
+-base_cfg=rj_ee_options;
+-keys=fieldnames(base_cfg);
+-for kk=1:numel(keys)
+-    if ~isfield(run_cfg,keys{kk}), run_cfg.(keys{kk})=base_cfg.(keys{kk}); end
++function result_file=Main_rjmcmc_20000(cfg)
++% Compatibility entry; configuration controls all settings and iteration count.
++    if nargin<1, cfg=rj_ee_options; end
++    result_file=Main_rjmcmc_EE(cfg);
+ end
+-validateattributes(run_cfg.birth_small,{'numeric'},{'scalar','positive','finite'});
+-validateattributes(run_cfg.birth_large,{'numeric'},{'scalar','positive','finite'});
+-validateattributes(run_cfg.birth_small_weight,{'numeric'},{'scalar','>=',0,'<=',1});
+-if ~isfolder(run_cfg.output_dir), mkdir(run_cfg.output_dir); end
+-
+-
+-root=fileparts(mfilename('fullpath'));
+-addpath(fullfile(root,'core'), '-begin');
+-rehash path;
+-forward_failure_log('reset');
+-
+-% % 初始化disba库（用于频散曲线计算）
+-initialize_disba
+-% usePar = true;
+-
+-% if usePar
+-%     if isempty(gcp('nocreate'))
+-%         parpool('local');
+-%     end
+-% 
+-% 
+-%     % 在所有 worker 上执行初始化
+-%     f = parfevalOnAll(@worker_init_disba, 0, corePath);
+-%     wait(f);
+-% end
+-
+-% 设置随机数生成器（确保结果可复现）
+-rng('default');
+-num_rng=run_cfg.seed;
+-rng(num_rng); 
+-
+-%% ========================================================================
+-%% 数据准备
+-% 加载观测数据
+-data = load('rayleigh_dispersion_curves.txt');                                % 输入文件名
+-outfile = ['Gao_TVF_5_2_result_RJ_MIX_EE_' datestr(now,'yyyymmdd_HHMMSS_FFF') '.mat']; % 新结果避免覆盖v4
+-% 定义真实模型参数（用于结果验证）
+-Model = [400 600 500 700 900 5 5 5 10];
+-
+-% 设置数据模式
+-data_mode.freq = data(:,1);         % 频率数据
+-data_mode.data_mode = data(:,2:end);   % 相速度数据
+-
+-data_mode.nd = numel(data_mode.freq);   % 数据点数量
+-data_mode.dc_num = size(data_mode.data_mode, 2);
+-% 本数据文件三列依次对应Rayleigh波0、1、2阶模态。
+-data_mode.mode_indices = 0:(data_mode.dc_num - 1);
+-% 定义拟合误差（3%的相对误差）
+-fit_error.fitting_error = max(abs(data_mode.data_mode) .* 0.03, 2);
+-
+-%% ========================================================================
+-%% 反演参数设置
+-% MCMC采样参数
+-burn_in = run_cfg.burn_in;  % 预热期样本数
+-nsample = run_cfg.nsample; % 总样本数
+-
+-% 深度先验范围
+-priors.depth_min = 0;  
+-priors.depth_max = 35;
+-
+-% 可变层数范围
+-priors.npt_min = 1;  
+-priors.npt_max = run_cfg.npt_max;
+-% 浮动Voronoi核在物理上无标签、可交换。logprior_model_state中的n!项
+-% 与Death随机删除一个核的1/n提议概率配套，保证下述npt先验确为均匀。
+-priors.rj_state_measure = 'unordered_iid_uniform_depth';
+-priors.log_p_npt = repmat( ...
+-    -log(priors.npt_max - priors.npt_min + 1), ...
+-    1, priors.npt_max - priors.npt_min + 1);
+-priors.proposal_prob_birth = 1/3;
+-priors.proposal_prob_death = 1/3;
+-priors.proposal_prob_move = 1/3;
+-
+-% 固定层数
+-priors.num_layers = 1;
+-
+-% 层边界深度（最后一层深度无限）
+-priors.layer_depths = zeros(priors.num_layers-1, 1); 
+-
+-% 各层波速范围
+-priors.vsmin = zeros(priors.num_layers, 1);
+-priors.vsmax = zeros(priors.num_layers, 1);
+-priors.vsmin(1) = 300; 
+-priors.vsmax(1) = 1000;
+-
+-% Vp/Vs关系常数：与本算例五层理论模型 Vp=2*Vs 保持一致。
+-priors.vp_vs=2.0;
+-
+-% 初始可变层数
+-npt_init = 1; 
+-
+-% 提议分布标准差
+-sigma.change_vs = run_cfg.change_vs;      % 波速变化标准差
+-sigma.move_depth = run_cfg.move_depth;      % 深度移动标准差
+-sigma.birth_mixture=run_cfg.birth_mixture;
+-sigma.birth_small=run_cfg.birth_small;
+-sigma.birth_small_weight=run_cfg.birth_small_weight;
+-sigma.birth_vs = run_cfg.birth_large;      % 新生层波速标准差
+-
+-%% ========================================================================
+-%% 次要参数设置
+-% 模型范围
+-x_min = priors.depth_min;
+-x_max = priors.depth_max;
+-
+-% 离散化参数
+-dis = 150;   % 深度离散点数
+-dis_y = 160; % 波速离散点数
+-
+-% 显示和细化参数
+-show = 1000;  % 显示统计信息的间隔
+-thin = 10;   % 少量抽稀；是否足够仍应通过自相关和ESS判断
+-
+-if burn_in >= nsample
+-    error('burn_in 必须小于 nsample。');
+-end
+-if thin < 1 || thin ~= round(thin)
+-    error('thin 必须为正整数。');
+-end
+-
+-% 创建离散网格
+-x = linspace(x_min, x_max, dis);                     % 深度网格
+-% 计算样本数量
+-n_keep = floor(nsample / thin) - floor(burn_in / thin);
+-num = max(1, ceil(0.025 * n_keep));                    % each posterior tail
+-% 网格边界
+-depth_edge = 0.5 * (x(1:end-1) + x(2:end));
+-
+-%% ========================================================================
+-%% 设置横波速度搜索范围
+-initial_model = linspace(priors.vsmin(1), priors.vsmax(1), dis)';
+-% initial_model = initial_model(:,2)';
+-priors = velocity_search_range(priors, x, 'increasing', ...
+-     'InitialModel', initial_model,...
+-     'MinRatio', 0.2, 'MaxRatio', 4);
+-% priors = velocity_search_range(priors, x, 'fixed', ...
+-%      'InitialModel', initial_model,...
+-%      'MinRatio', 1, 'MaxRatio', 1);
+-
+-y = linspace(min(priors.vsmin), max(priors.vsmax), dis_y); % 波速网格
+-vs_edge = 0.5 * (y(1:end-1) + y(2:end));
+-%% ========================================================================
+-%% 并行回火设置
+-T = 4;  % 温度链数量
+-Tmin = 1;  Tmax = 8;
+-beta = Temp_Ladder(T, Tmin, Tmax, 'geometric'); % 逆温度：1/T
+-% Kou等人的标准EE框架依赖多条温度辅助链，但不要求链间交换。
+-% 为单独检验RJ+EE效果，v3默认关闭PT交换；如需组合实验可改为true。
+-enable_temperature_swaps = false;
+-swap_interval = 100;
+-% Temp = 1;
+-
+-%% ========================================================================
+-%% Equi-Energy 能量环设置
+-% 能量环使用 E=like（高斯负对数似然失配）。这与当前程序“只对似然
+-% 回火、先验不回火”的目标分布保持一致。
+-% ---- DIM-inspired EE options: all non-EE v4 settings above are untouched ----
+-EE = ee_initialize(nsample, T, burn_in);
+-EE.enable = run_cfg.enable_ee;
+-EE.nbins = 12;
+-EE.jump_probability = run_cfg.ee_probability;
+-EE.jump_interval = 1;
+-EE.min_ring_size = 10;
+-EE.calibration_start = 5001;
+-EE.calibration_end = 7000;
+-EE.jump_start = 8501;       % 7001:8500 fills history; collect after 10000
+-EE.ring_thin = 1;          % archive every completed iteration (posterior thin unchanged)
+-EE.max_per_ring = Inf;     % full post-calibration history; no reservoir eviction
+-EE.fixed_edges = [];      % []: one-time v4 pooled pilot quantiles; then freeze
+-EE.truncation_enable = false; % independently disable for ablation
+-EE.floor_calibration_start = 1001;
+-EE.floor_calibration_end = 4000; % then 4001:5000 settles truncated hot chains
+-EE.floor_quantiles = [0.2 0.5 0.8]; % cold-pilot quantiles for hot chains 2,3,4
+-EE.refine_low_energy = true; % extra 6 low-energy boundaries; actual count printed
+-EE = ee_dim_configure(EE, nsample, T, burn_in);
+-
+-tic  % 开始计时
+-
+-% 初始化变量结构体
+-[variable] = initialize_variable(dis, num);
+-
+-% 初始化结果结构体
+-[result] = initialize_result(dis, dis_y, priors, nsample, T, num, n_keep);
+-
+-% 初始化前向模型矩阵
+-forward_model = zeros(data_mode.nd, data_mode.dc_num+1, T);
+-
+-% 初始化操作计数器
+-[Num] = monitoring(T);
+-
+-%% ========================================================================
+-%% 初始化马尔可夫链
+-% 初始化模型参数矩阵
+-nuclei_vs = zeros(priors.npt_max + priors.num_layers, T);
+-nuclei_depths = zeros(priors.npt_max + priors.num_layers, T);
+-
+-% 初始化似然值和层数向量
+-like = zeros(1, T);
+-npt = zeros(1, T);
+-
+-% 初始化链的第一个模型
+-[nuclei_vs, nuclei_depths, npt, like, like_best, priors_OK, forward_model] = ...
+-    initialize_chain(npt_init, priors, data_mode, fit_error, ...
+-    nuclei_vs, nuclei_depths, npt, like, T,x);
+-
+-[best_mode, forward_model_best] = best_mode_init(nuclei_depths, nuclei_vs, npt, like, forward_model);
+-
+-%% ========================================================================
+-%% MCMC采样主循环
+-fprintf('Total number of samples %i\n', nsample);
+-fprintf('Acceptance rates:\n');
+-fprintf('Iteration  Change Vs    Move Depth    Birth     Death\n');
+-
+-for s = 1:nsample
+-    out = 1;  % 模型有效性标志
+-    
+-    % 显示采样进度和接受率
+-    if mod(s, show) == 0
+-        fprintf('%7i     %5.2f         %5.2f       %5.2f     %5.2f\n', ...
+-            s, 100*Num(1).AcV/Num(1).PV, 100*Num(1).AP/Num(1).PP, ...
+-            100*Num(1).AB/Num(1).PB, 100*Num(1).AD/Num(1).PD);
+-    end
+-    
+-    %% 更新所有温度链：局部RJMCMC与EE跳跃互斥二选一
+-    % 对第1至T-1条链，先以EE.jump_probability选择更新类型：
+-    %   - 选中EE且供体环可用：只做EE；拒绝后保留旧状态，不再做RJ。
+-    %   - 未选中EE：做一次局部RJMCMC。
+-    %   - 选中EE但供体环不可用：本轮保持原状态，不再做RJ；这可保持
+-    %     固定混合概率不随当前模型所在能量环发生变化。
+-    % 最高温链没有更高温供体，因此始终做局部RJMCMC。
+-    for t = 1:T
+-        [nuclei_depths, nuclei_vs, npt, like, forward_model, ...
+-            use_local_rj, EE] = ee_jump(nuclei_depths, nuclei_vs, ...
+-            npt, like, forward_model, beta, EE, s, t);
+-
+-        if use_local_rj
+-            local_priors=priors;
+-            local_priors.ee_energy_floor=EE.energy_floors(t);
+-            [nuclei_depths(:, t), nuclei_vs(:, t), ...
+-                forward_model(:, :, t), like(:, t), npt(:, t), Num(t)] = ...
+-                RJ_C_mian(nuclei_vs(:, t), nuclei_depths(:, t), ...
+-                like(:, t), npt(:, t), local_priors, sigma, s, Num(t), out, ...
+-                data_mode, fit_error, beta(:, t), x, ...
+-                forward_model(:, :, t));
+-            EE.local_updates(t) = EE.local_updates(t) + 1;
+-        end
+-    end
+-
+-    %% 可选温度交换（默认关闭，不与EE效果混合）
+-    if enable_temperature_swaps && mod(s, swap_interval) == 0
+-        swap_event = s / swap_interval;
+-        [nuclei_depths, nuclei_vs, npt, like, forward_model] = ...
+-            non_Re_tem_swap_3(nuclei_depths, nuclei_vs, npt, like, ...
+-            beta, T, swap_event, forward_model, priors, EE.energy_floors);
+-    end
+-
+-    %% 将接受/拒绝判断后的最终状态写入能量环
+-    % EE候选只来自以前的历史环；本轮最终状态在全部更新结束后只入库一次。
+-    EE = ee_ring_update(EE, s, nuclei_depths, nuclei_vs, npt, ...
+-        like, forward_model);
+-  
+-    % 存储主链（温度=1）的当前状态
+-    chain.nuclei_depths = nuclei_depths(:, 1);
+-    chain.nuclei_vs = nuclei_vs(:, 1);
+-    chain.like = like(:, 1);
+-    chain.npt = npt(:, 1);
+-    chain.forward_model = forward_model(:, :, 1);
+-    [best_mode, forward_model_best] = best_mode_update( ...
+-        best_mode, chain, 1, forward_model, forward_model_best);
+-    %% 样本收集（预热期后）
+-    % 计算当前模型的置信密度矩阵
+-
+-    % [N] = parameter_N(dis, nuclei_depths, nuclei_vs, priors, variable, x, y, chain.npt);           
+-    % 
+-    % % 更新最佳模型
+-    % [best_mode, forward_model_best] = best_mode_update(best_mode, chain, priors_OK, forward_model, forward_model_best);
+-
+-    % 收集样本（预热期后且满足细化间隔）
+-    if s > burn_in && mod(s, thin) == 0
+-    [N] = parameter_N(dis, nuclei_depths, nuclei_vs, priors, variable, x, y, chain.npt);           
+-    
+-        [result, variable, priors] = ...
+-            Collect_samples(dis, priors, variable, result, x, chain, best_mode, num, N);
+-    end
+-    
+-    %% 存储链状态
+-    result.cov(s) = chain.like;                           % 当前似然值
+-    result.nnuclei(s) = chain.npt + priors.num_layers;    % 当前总层数
+-    result.cov_all(s, :) = like;                          % 所有链的似然值
+-
+-end  % 结束MCMC采样
+-
+-% 每条链每轮必须且只能选择一个主更新分支。
+-update_count = EE.local_updates;
+-update_count(1:T-1) = update_count(1:T-1) + EE.jump_triggered;
+-if any(update_count ~= nsample)
+-    error('Main_rjmcmc:MixtureCountMismatch', ...
+-        'RJ/EE更新计数不等于总迭代数，请检查互斥更新逻辑。');
+-end
+-
+-sampling_seconds=toc;  % 结束计时
+-fprintf('Sampling time %.3f s\n',sampling_seconds);
+-fprintf('Retained cold-chain posterior samples: %d\n', ...
+-    variable.counter_basic);
+-for t = 1:(T-1)
+-    fprintf(['EE chain %d <- %d: selected=%d, unavailable/self-loop=%d, ' ...
+-        'valid proposals=%d, accepted=%d, cross-dimensional ' ...
+-        'proposed=%d, accepted=%d\n'], ...
+-        t, t+1, EE.jump_triggered(t), EE.jump_unavailable(t), ...
+-        EE.jump_proposed(t), EE.jump_accepted(t), ...
+-        EE.jump_crossdim_proposed(t), EE.jump_crossdim_accepted(t));
+-end
+-fprintf('Local RJ updates per chain:');
+-fprintf(' %d', EE.local_updates);
+-fprintf('\n');
+-
+-%% ========================================================================
+-%% 后处理与结果分析
+-% 计算平均模型和最佳模型速度剖面
+-[result, best_model_vs] = Average_confidence(result, variable, priors, dis, best_mode, x);
+-
+-% 计算置信密度矩阵
+-[CI_density_limitN, CI_density_limit] = CI_density(result, variable, dis, x, y);
+-
+-% 计算最大后验波速剖面
+-[vs_mode_n0] = Depth_best_vs(dis, dis_y, CI_density_limit, vs_edge);
+-
+-% 计算中位数波速剖面
+-[vs_median] = Depth_median_vs(dis, dis_y, CI_density_limit, vs_edge);
+-
+-%% ========================================================================
+-%% 保存结果
+-print_rj_reasons(Num);
+-forward_diagnostics=forward_failure_log('get');
+-disp(forward_diagnostics);
+-result_file=fullfile(run_cfg.output_dir,outfile);
+-save(result_file)
+-
+-%% ========================================================================
+-%% 结果可视化
+-if run_cfg.make_plots
+-
+-% 对最大后验与中位数剖面做轻微平滑，仅用于显示。
+-vs_mode_plot = Filter_Local_median(vs_mode_n0, 31, 0.01, 0.05);
+-vs_median_plot = Filter_Local_median(vs_median, 31, 0.01, 0.05);
+-vs_mean_plot = Filter_mean5_3(result.AV, 20);
+-
+-% 图1：速度剖面、Vs后验密度与界面概率。
+-plot_velocity_posterior(priors, x, Model, vs_mode_plot, ...
+-    best_model_vs, vs_mean_plot, vs_median_plot, vs_edge, depth_edge, ...
+-    CI_density_limitN, result, variable);
+-
+-% 图2：观测频散点与最佳拟合样本的正演频散曲线。
+-plot_dispersion_fit(data_mode, forward_model_best);
+-
+-% 图3：收敛轨迹、界面深度密度与模型维数后验概率。
+-plot_mcmc_diagnostics(result, variable, priors, Model, burn_in, nsample);
+-
+-%% Equi-Energy 能量环诊断图
+-ee_plot_diagnostics(EE)
+-plot_ee_dim_extra(EE); % Additional EE diagnostics; original figure calls unchanged
+-
+-end % optional plots
+-
+-end
+--- baseline/Replot_saved_result.m
++++ new/Replot_saved_result.m
+@@ -57,5 +57,6 @@
+ 
+     if isfield(saved, 'EE')
+         ee_plot_diagnostics(saved.EE);
++        if isfield(saved.EE,'pair_edges'), plot_ee_dim_extra(saved.EE); end
+     end
+ end
+--- baseline/core/Birth.m
++++ new/core/Birth.m
+@@ -25,8 +25,8 @@
+     npt_prop = npt + 1;
+     knew = priors.num_layers + npt_prop;
+ 
+-    new_depth = priors.depth_min + rand * ...
+-        (priors.depth_max - priors.depth_min);
++    [depth_pdf,new_depth] = rj_depth_proposal( ...
++        nuclei_depths(1:knew-1),priors,sigma);
+     nuclei_depths_prop(knew) = new_depth;
+ 
+     [~, depth_idx] = min(abs(x - new_depth));
+@@ -79,6 +79,9 @@
+     [~, p_death_reverse, ~] = rj_operation_probabilities(npt_prop, priors);
+     depth_span = priors.depth_max - priors.depth_min;
+     log_q_forward = log(p_birth) - log(depth_span) + log(proposal_pdf);
++    if isfield(sigma,'birth_depth') && sigma.birth_depth.enabled
++        log_q_forward = log(p_birth) + log(depth_pdf) + log(proposal_pdf);
++    end
+     log_q_reverse = log(p_death_reverse) - log(npt_prop);
+     log_jacobian = 0;
+     log_alpha = ee_likelihood_delta(like, like_prop, beta, priors) + ...
+--- baseline/core/Death.m
++++ new/core/Death.m
+@@ -67,6 +67,12 @@
+     depth_span = priors.depth_max - priors.depth_min;
+     log_q_forward = log(p_death) - log(npt);
+     log_q_reverse = log(p_birth_reverse) - log(depth_span) + log(proposal_pdf);
++    if isfield(sigma,'birth_depth') && sigma.birth_depth.enabled
++        % Reverse birth starts from the AFTER-DELETION state.
++        depth_pdf = rj_depth_proposal( ...
++            nuclei_depths_prop(1:Kcur-1),priors,sigma,deleted_depth);
++        log_q_reverse = log(p_birth_reverse) + log(depth_pdf) + log(proposal_pdf);
++    end
+     log_jacobian = 0;
+     log_alpha = ee_likelihood_delta(like, like_prop, beta, priors) + ...
+         (logprior_prop - logprior_current) + ...
+--- baseline/core/ee_dim_configure.m
++++ new/core/ee_dim_configure.m
+@@ -26,6 +26,13 @@
+         end
+         EE.fixed_edges=e;
+     end
++    if ~any(strcmp(EE.calibration_mode,{'pooled','pairwise'}))
++        error('EE:CalibrationMode','Use pooled or pairwise.');
++    end
++    validateattributes(EE.min_pilot_donor_count,{'numeric'},{'scalar','integer','positive'});
++    if EE.merge_sparse && strcmp(EE.calibration_mode,'pooled')
++        error('EE:MergeMode','Sparse merging is pairwise only; pooled is the exact baseline option.');
++    end
+     EE.requested_nbins=EE.nbins;
+     EE.nsample=nsample; EE.nchains=T;
+     if EE.truncation_enable
+@@ -40,7 +47,8 @@
+     end
+     EE.configured=true;
+     if EE.enable
+-        fprintf('DIM-inspired EE: likelihood only, fixed rings, full post-calibration history; optional likelihood energy floor.\n');
++        fprintf('EE: %s pilot; likelihood energy; full post-calibration history; merge=%d; floor=%d.\n', ...
++            EE.calibration_mode,EE.merge_sparse,EE.truncation_enable);
+         fprintf('EE calibration %d:%d; filling %d:%d; jumps from %d; posterior burn-in stays %d.\n', ...
+             EE.calibration_start,EE.calibration_end,EE.calibration_end+1,EE.jump_start-1,EE.jump_start,burn_in);
+     end
+--- baseline/core/ee_initialize.m
++++ new/core/ee_initialize.m
+@@ -2,8 +2,8 @@
+ %EE_INITIALIZE DIM-inspired fixed likelihood rings, full post-pilot history.
+ % Adaptation of DIM_MATLAB_Core ideas; see NOTICE_DIM.txt.
+ % Target of the UNCHANGED v4 RJ: p(m)*exp(-beta*like).
+-% No posterior-power tempering, energy floor, BSP or Schreck adaptation.
+-    EE.version = 41;
++% Optional likelihood floors are supported; default off. No BSP or Schreck AEE.
++    EE.version = 50;
+     EE.enable = true;
+     EE.energy_type = 'negative_log_likelihood';
+     EE.update_mode = 'mixture_rj_or_ee';
+@@ -55,5 +55,21 @@
+     EE.energy_floors=-Inf(1,EE.nchains);
+     EE.floor_frozen_at=NaN;
+     EE.refine_low_energy=false;
++    % Legacy default retained for contract tests. Main config selects pairwise.
++    EE.calibration_mode='pooled';
++    EE.merge_sparse=false;
++    EE.min_pilot_donor_count=20;
++    EE.pair_edges=cell(1,max(T-1,1));
++    EE.pair_nbins=zeros(1,max(T-1,1));
++    EE.chain_edges=cell(1,T);
++    EE.calibration_report=cell(1,max(T-1,1));
++    EE.diagnostic_priors=[];
++    EE.diagnostic_grid=[];
++    EE.donor_count_at_selection=nan(nsample,max(T-1,1));
++    EE.unavailable_reason=zeros(nsample,max(T-1,1),'uint8');
++    EE.current_npt=nan(nsample,max(T-1,1));
++    EE.candidate_npt=nan(nsample,max(T-1,1));
++    EE.profile_rms_delta=nan(nsample,max(T-1,1));
++    EE.profile_max_delta=nan(nsample,max(T-1,1));
+ 
+ end
+--- baseline/core/ee_jump.m
++++ new/core/ee_jump.m
+@@ -54,11 +54,15 @@
+     end
+ 
+     donor = t + 1;
+-    k = ee_dim_bin(like_row(t), EE.edges);
++    pair_edges = ee_edges_for_chain(EE,donor);
++    k = ee_dim_bin(like_row(t), pair_edges);
+     EE.current_energy(s,t) = like_row(t);
+     EE.selected_ring(s,t) = k;
+     count = EE.ring_count(donor, k);
++    EE.donor_count_at_selection(s,t)=count;
++    EE.current_npt(s,t)=npt(t);
+     if count < EE.min_ring_size
++        EE.unavailable_reason(s,t)=uint8(1); % donor shortage
+         % No usable proposal: retain the current state for this EE update.
+         EE.jump_unavailable(t) = EE.jump_unavailable(t) + 1;
+         return;
+@@ -69,6 +73,7 @@
+             ~isequal(size(y.depths), size(nuclei_depths(:, t))) || ...
+             ~isequal(size(y.vs), size(nuclei_vs(:, t))) || ...
+             ~isequal(size(y.forward_model), size(forward_model(:, :, t)))
++        EE.unavailable_reason(s,t)=uint8(2); % invalid archived state
+         EE.jump_unavailable(t) = EE.jump_unavailable(t) + 1;
+         return;
+     end
+@@ -78,13 +83,19 @@
+     if y.iteration >= s
+         error('EE:DIMFutureHistory','EE candidate must come from a completed past iteration.');
+     end
+-    if ee_dim_bin(y.like, EE.edges) ~= k
++    if ee_dim_bin(y.like, pair_edges) ~= k
+         error('EE:DIMWrongRing','Candidate is not in the same fixed energy ring.');
+     end
+     EE.candidate_energy(s,t) = y.like;
+     EE.candidate_iteration(s,t) = y.iteration;
+     EE.ring_attempts(t,k) = EE.ring_attempts(t,k)+1;
+     current_npt = npt(t);
++    EE.candidate_npt(s,t)=y.npt;
++    if isfield(EE,'diagnostic_priors') && ~isempty(EE.diagnostic_priors)
++        [EE.profile_rms_delta(s,t),EE.profile_max_delta(s,t)]=ee_profile_distance( ...
++            nuclei_depths(:,t),nuclei_vs(:,t),npt(t),y.depths,y.vs,y.npt, ...
++            EE.diagnostic_priors,EE.diagnostic_grid);
++    end
+     EE.jump_candidate_energy_delta(s, t) = y.like - like_row(t);
+     EE.jump_candidate_npt_delta(s, t) = y.npt - current_npt;
+     is_crossdimensional = y.npt ~= current_npt;
+--- baseline/core/ee_plot_diagnostics.m
++++ new/core/ee_plot_diagnostics.m
+@@ -1,77 +1,41 @@
+ function ee_plot_diagnostics(EE)
+-%EE_PLOT_DIAGNOSTICS Plot ring occupancy and mixture-update diagnostics.
+-
+-    if ~EE.enable
+-        return;
++% EE-only plots. Padded bins are blank; each row may have different edges.
++    if ~EE.enable || isempty(EE.edges), return; end
++    C=EE.nchains-1;
++    counts=EE.ring_count(2:end,:);
++    for r=1:C
++        edges=ee_edges_for_chain(EE,r+1); B=numel(edges)-1;
++        counts(r,B+1:end)=NaN;
+     end
+-
+-    blue = [0.137 0.357 0.651];
+-    orange = [0.850 0.420 0.020];
+-    teal = [0.059 0.463 0.431];
+-
+-    fig = figure('Color', 'w', 'Name', 'Equi-Energy diagnostics', ...
+-        'Position', [120 80 1320 820]);
+-    layout = tiledlayout(fig, 2, 2, ...
+-        'TileSpacing', 'compact', 'Padding', 'compact');
+-
+-    ax1 = nexttile(layout, 1);
+-    imagesc(ax1, double(EE.ring_seen));
+-    axis(ax1, 'xy');
+-    colormap(ax1, posterior_blue_colormap(256));
+-    cb1 = colorbar(ax1);
+-    cb1.Label.String = 'Number of visits';
+-    xlabel(ax1, 'Energy-ring index');
+-    ylabel(ax1, 'Temperature-chain index');
+-    title(ax1, '(a) Total visits to each energy ring');
+-    style_axes(ax1, false);
+-
+-    ax2 = nexttile(layout, 2);
+-    imagesc(ax2, EE.ring_count);
+-    axis(ax2, 'xy');
+-    colormap(ax2, posterior_blue_colormap(256));
+-    cb2 = colorbar(ax2);
+-    cb2.Label.String = 'Number of stored states';
+-    xlabel(ax2, 'Energy-ring index');
+-    ylabel(ax2, 'Temperature-chain index');
+-    title(ax2, '(b) States retained in each reservoir');
+-    style_axes(ax2, false);
+-
+-    ax3 = nexttile(layout, 3);
+-    rate = zeros(size(EE.jump_proposed));
+-    valid = EE.jump_proposed > 0;
+-    rate(valid) = EE.jump_accepted(valid) ./ EE.jump_proposed(valid);
+-    crossdim_rate = zeros(size(EE.jump_crossdim_proposed));
+-    valid_crossdim = EE.jump_crossdim_proposed > 0;
+-    crossdim_rate(valid_crossdim) = ...
+-        EE.jump_crossdim_accepted(valid_crossdim) ./ ...
+-        EE.jump_crossdim_proposed(valid_crossdim);
+-    h_rate = bar(ax3, 1:numel(rate), 100 * [rate(:), crossdim_rate(:)]);
+-    h_rate(1).FaceColor = blue;
+-    h_rate(2).FaceColor = orange;
+-    xlabel(ax3, 'Recipient chain i (donor chain i+1)');
+-    ylabel(ax3, 'Acceptance rate (%)');
+-    title(ax3, '(c) Equi-Energy jump acceptance');
+-    legend(ax3, 'All valid EE proposals', ...
+-        'Cross-dimensional EE proposals', ...
+-        'Location', 'southoutside', 'Box', 'off');
+-    ylim(ax3, [0 100]);
+-    style_axes(ax3, true);
+-
+-    ax4 = nexttile(layout, 4);
+-    selected_ee_updates = zeros(size(EE.local_updates));
+-    selected_ee_updates(1:numel(EE.jump_triggered)) = EE.jump_triggered;
+-    h_mix = bar(ax4, 1:numel(EE.local_updates), ...
+-        [EE.local_updates(:), selected_ee_updates(:)]);
+-    h_mix(1).FaceColor = teal;
+-    h_mix(2).FaceColor = orange;
+-    xlabel(ax4, 'Temperature-chain index');
+-    ylabel(ax4, 'Number of selected updates');
+-    title(ax4, '(d) RJ/EE mixture-kernel composition');
+-    legend(ax4, 'Local RJ updates', 'Selected EE updates', ...
+-        'Location', 'southoutside', 'Box', 'off');
+-    style_axes(ax4, true);
+-
+-    title(layout, 'Equi-Energy reservoir and jump diagnostics', ...
+-        'FontName', 'Times New Roman', 'FontSize', 16, ...
+-        'FontWeight', 'bold', 'Color', [0.09 0.15 0.33]);
++    figure('Color','w','Name','EE availability and update accounting');
++    tiledlayout(2,2,'TileSpacing','compact','Padding','compact');
++    nexttile;
++    imagesc(counts,'AlphaData',isfinite(counts)); colorbar;
++    xlabel('Ring index WITHIN pair'); ylabel('Recipient i; donor i+1');
++    title('Donor time entries (edges may differ by row)');
++    nexttile;
++    available=EE.jump_proposed./max(EE.jump_triggered,1);
++    conditional=EE.jump_accepted./max(EE.jump_proposed,1);
++    overall=EE.jump_accepted./max(EE.jump_triggered,1);
++    available(EE.jump_triggered==0)=NaN;
++    conditional(EE.jump_proposed==0)=NaN;
++    overall(EE.jump_triggered==0)=NaN;
++    bar(100*[available(:) conditional(:) overall(:)]);
++    ylim([0 100]); xlabel('Recipient'); ylabel('Percent');
++    legend('Available / selected','Accepted / valid','Accepted / selected','Location','best');
++    title('Availability and acceptance are separate');
++    nexttile;
++    for r=1:C
++        selected=cumsum(EE.jump_history(:,r)~=0);
++        accepted=cumsum(EE.jump_history(:,r)==1);
++        curve=accepted./max(selected,1); curve(selected==0)=NaN;
++        plot(curve); hold on;
++    end
++    xlabel('Iteration'); ylabel('Cumulative accepted / selected');
++    title('Conditional on choosing EE; no convergence claim');
++    nexttile;
++    bar([EE.local_updates(:),[EE.jump_triggered(:);0]],'stacked');
++    xlabel('Temperature chain'); ylabel('Number of updates');
++    legend('Local RJ','Selected EE','Location','best');
++    title('One primary update branch per chain per sweep');
+ end
+--- baseline/core/ee_ring_update.m
++++ new/core/ee_ring_update.m
+@@ -1,5 +1,5 @@
+ function EE = ee_ring_update(EE, s, nuclei_depths, nuclei_vs, npt, like, forward_model)
+-%EE_RING_UPDATE Freeze one set of rings, then retain all completed states.
++%EE_RING_UPDATE Freeze shared or pairwise rings, then retain all completed states.
+ % Stored ring entries are time observations, NOT unique models or best models.
+     if ~EE.enable && ~EE.truncation_enable, return; end
+     if ~EE.configured, error('EE:DIMConfig','Call ee_dim_configure after setting EE options.'); end
+@@ -21,25 +21,28 @@
+         EE.energy_buffer=[EE.energy_buffer energy]; %#ok<AGROW>
+     end
+     if s==EE.calibration_end
+-        if isempty(EE.fixed_edges)
+-            % One-time pooled pilot quantiles, as in v4; NOT ongoing AEE.
+-            if isempty(EE.energy_buffer), error('EE:DIMPilot','Calibration contains no energies.'); end
+-            q=(1:EE.requested_nbins-1)/EE.requested_nbins;
+-            if isempty(q), internal=[];
+-            else, internal=unique(quantile(EE.energy_buffer,q)); end
+-            if EE.refine_low_energy
+-                % Raw misfit is nonnegative. Add low-energy resolution even
+-                % when the cold chain later improves beyond the pilot range.
+-                cold=EE.energy_history(EE.calibration_start:s,1);
+-                top=median(cold);
+-                low=linspace(0,max(top,eps),7);
+-                internal=unique([internal(:).' low(2:end)]);
++        pilots=EE.energy_history(EE.calibration_start:s,:);
++        for r=1:T-1
++            if strcmp(EE.calibration_mode,'pooled')
++                pilot=EE.energy_buffer;
++                recipient=pilots(:,1); % legacy low-energy refinement
++            else
++                pilot=reshape(pilots(:,r:r+1),[],1);
++                recipient=pilots(:,r);
+             end
+-            EE.edges=[-Inf internal(:).' Inf];
+-        else
+-            EE.edges=EE.fixed_edges;
++            [edges,report]=ee_calibrate_pair(pilot,recipient,pilots(:,r+1),EE);
++            % Report recipient occupancy for the actual recipient even in pooled mode.
++            report.recipient_count=histcounts(pilots(:,r),edges);
++            report.recipient_mass_in_sparse_rings=sum(report.recipient_count( ...
++                report.donor_count<EE.min_pilot_donor_count))/size(pilots,1);
++            EE.pair_edges{r}=edges;
++            EE.pair_nbins(r)=numel(edges)-1;
++            EE.calibration_report{r}=report;
++            EE.chain_edges{r+1}=edges;
+         end
+-        EE.nbins=numel(EE.edges)-1;
++        EE.chain_edges{1}=EE.pair_edges{1};
++        EE.edges=EE.pair_edges{1}; % compatibility alias ONLY for the cold pair
++        EE.nbins=max(EE.pair_nbins);
+         EE.rings=cell(T,EE.nbins);
+         EE.ring_count=zeros(T,EE.nbins);
+         EE.ring_seen=zeros(T,EE.nbins,'uint64');
+@@ -47,8 +50,11 @@
+         EE.ring_accepts=zeros(max(T-1,1),EE.nbins);
+         EE.boundaries_frozen_at=s;
+         EE.archive_start=s+1;
+-        fprintf('EE boundaries frozen at %d; requested %d rings, actual %d:\n',s,EE.requested_nbins,EE.nbins);
+-        fprintf(' %g',EE.edges); fprintf('\n');
++        fprintf('EE boundaries frozen at %d; requested %d rings per pair:\n',s,EE.requested_nbins);
++        for r=1:T-1
++            fprintf('  %d <- %d: %d rings; edges:',r,r+1,EE.pair_nbins(r));
++            fprintf(' %g',EE.pair_edges{r}); fprintf('\n');
++        end
+     elseif s>EE.calibration_end
+         if isempty(EE.edges), error('EE:DIMSchedule','Calibration boundary was skipped.'); end
+         if EE.archive_last_iteration~=0 && s~=EE.archive_last_iteration+1
+@@ -58,7 +64,7 @@
+             error('EE:DIMArchiveStart','First archive write must follow calibration.');
+         end
+         for t=1:T
+-            k=ee_dim_bin(energy(t),EE.edges);
++            k=ee_dim_bin(energy(t),ee_edges_for_chain(EE,t));
+             state=struct('depths',nuclei_depths(:,t),'vs',nuclei_vs(:,t), ...
+                 'npt',npt(t),'like',energy(t),'energy',energy(t), ...
+                 'forward_model',forward_model(:,:,t),'iteration',s);
+--- baseline/core/plot_ee_dim_extra.m
++++ new/core/plot_ee_dim_extra.m
+@@ -1,43 +1,41 @@
+ function plot_ee_dim_extra(EE)
+-%PLOT_EE_DIM_EXTRA Additional figures only; original v4 plots are untouched.
+-    if ~EE.enable, return; end
+-    figure('Color','w','Name','DIM-inspired EE: candidate diagnostics');
+-    C=numel(EE.jump_proposed);
+-    for t=1:C
+-        subplot(C,2,2*t-1);
+-        ok=isfinite(EE.candidate_energy(:,t));
+-        x=EE.current_energy(ok,t); y=EE.candidate_energy(ok,t);
+-        scatter(x,y,8,'filled'); hold on;
+-        if ~isempty(x)
+-            lo=min([x;y]); hi=max([x;y]);
+-            if hi==lo, hi=lo+1; end
+-            plot([lo hi],[lo hi],'k--');
+-        end
+-        xlabel('Current data misfit'); ylabel('Candidate data misfit');
+-        title(sprintf('Chain %d <- %d',t,t+1)); grid on;
+-        subplot(C,2,2*t);
+-        ids=find(ok); a=exp(EE.log_acceptance(ok,t));
+-        plot(ids,a,'.'); ylim([0 1]); grid on;
+-        xlabel('Iteration'); ylabel('EE acceptance probability');
++% Pair-specific plots; no changes to baseline inversion figures.
++    if ~EE.enable || isempty(EE.edges), return; end
++    C=EE.nchains-1;
++    figure('Color','w','Name','EE energy and structure');
++    tiledlayout(C,3,'TileSpacing','compact','Padding','compact');
++    for r=1:C
++        ok=abs(EE.jump_history(:,r))==1;
++        accepted=EE.jump_history(:,r)==1;
++        nexttile;
++        scatter(EE.current_energy(ok,r),EE.candidate_energy(ok,r),8, ...
++            double(accepted(ok)), 'filled');
++        xlabel('Current energy'); ylabel('Candidate energy');
++        title(sprintf('%d <- %d; color 1=accepted',r,r+1)); colorbar;
++        nexttile;
++        s=find(ok);
++        plot(s,EE.profile_rms_delta(ok,r),'.','Color',[.7 .7 .7]); hold on;
++        plot(find(accepted),EE.profile_rms_delta(accepted,r),'.');
++        xlabel('Iteration'); ylabel('Profile RMS change (m/s)');
++        title('Proposed / accepted structure change');
++        nexttile;
++        histogram(EE.candidate_iteration(accepted,r));
++        xlabel('Donor entry iteration'); ylabel('Accepted draws');
++        title('Which part of history is reused?');
+     end
+-    figure('Color','w','Name','DIM-inspired EE: fixed-ring history');
+-    subplot(2,2,1); imagesc(EE.ring_count); axis xy; colorbar;
+-    xlabel('Fixed energy ring'); ylabel('Chain'); title('Full history entries (no capacity limit)');
+-    subplot(2,2,2); hold on;
+-    for t=1:C
+-        rate=nan(1,EE.nbins); ok=EE.ring_attempts(t,:)>0;
+-        rate(ok)=100*EE.ring_accepts(t,ok)./EE.ring_attempts(t,ok);
+-        plot(1:EE.nbins,rate,'-o','DisplayName',sprintf('Chain %d',t));
++    figure('Color','w','Name','EE pairwise energy partitions');
++    tiledlayout(C,2,'TileSpacing','compact','Padding','compact');
++    for r=1:C
++        edges=ee_edges_for_chain(EE,r+1); B=numel(edges)-1;
++        nexttile;
++        plot(EE.energy_history(:,r:r+1)); hold on;
++        for b=2:numel(edges)-1, yline(edges(b),'--','Color',[.6 .6 .6]); end
++        xlabel('Iteration'); ylabel('Likelihood energy');
++        title(sprintf('%d <- %d, %d frozen rings',r,r+1,B));
++        legend('Recipient','Donor','Location','best');
++        nexttile;
++        bar(1:B,EE.ring_count(r+1,1:B));
++        xlabel('Ring index within this pair'); ylabel('Donor time entries');
++        title('Final archive, including repeated states');
+     end
+-    ylim([0 100]); xlabel('Fixed energy ring'); ylabel('Accepted / available (%)'); legend('show'); grid on;
+-    subplot(2,2,3); hold on;
+-    for t=1:C
+-        ids=find(isfinite(EE.candidate_iteration(:,t)));
+-        plot(ids,ids-EE.candidate_iteration(ids,t),'.','DisplayName',sprintf('Chain %d',t));
+-    end
+-    xlabel('Iteration'); ylabel('Candidate age (iterations)'); title('Age of sampled historical models'); grid on;
+-    subplot(2,2,4); plot(EE.energy_history); hold on;
+-    for v=EE.edges(2:end-1), yline(v,'k:'); end
+-    xline(EE.calibration_end,'k--'); xline(EE.jump_start,'r--');
+-    xlabel('Iteration'); ylabel('Data misfit'); title('Chain energies and frozen boundaries'); grid on;
+ end
+--- baseline/rj_ee_options.m
++++ new/rj_ee_options.m
+@@ -1,16 +1,76 @@
+-function cfg=rj_ee_options
++function cfg = rj_ee_options(case_name)
++% Single configuration entry. Units: m, m/s, Hz.
++% npt=floating nuclei; num_layers=1 => total cells K=npt+1.
++% Model is a plotting/check reference, NEVER used to train proposals.
++    if nargin<1, case_name='five'; end
++    root=fileparts(mfilename('fullpath'));
++    cfg.case_name=lower(char(case_name));
+     cfg.seed=24;
+     cfg.nsample=20000;
+     cfg.burn_in=10000;
+-    cfg.npt_max=7; % retain latest user prior; sensitivity runs separately
+-    cfg.enable_ee=true;
++    cfg.thin=10;                    % posterior only; never thin EE history
++    cfg.depth_min=0;
++    cfg.depth_max=35;
++    cfg.npt_min=1;
++    cfg.npt_max=7;                  % total 2..8 cells, not 7 total layers
++    cfg.npt_init=1;
++    cfg.npt_prior=[];               % [] uniform over allowed floating counts
++    cfg.vs_min=300;
++    cfg.vs_max=1000;
++    cfg.vp_vs=2;
++    cfg.search_range='increasing';  % baseline bounds; NOT monotone Vs
++    cfg.min_ratio=0.2;
++    cfg.max_ratio=4;
++    cfg.mode_indices=[0 1 2];
++    cfg.relative_error=0.01;         % likelihood std; does NOT add noise
++    cfg.error_floor=2;              % m/s, strictly positive
+     cfg.birth_mixture=true;
+-    cfg.birth_small=40;
++    cfg.birth_small=20;
+     cfg.birth_large=100;
+-    cfg.birth_small_weight=0.5;
++    cfg.birth_small_weight=0.8;
+     cfg.change_vs=20;
+     cfg.move_depth=1;
++    cfg.enable_a=false;             % optional Route A
++    cfg.a_local_weight=0.5;
++    cfg.a_halfwidth=2;              % m
++    cfg.temperatures=[1 2 4 8];
++    cfg.enable_pt=false;
++    cfg.swap_interval=100;
++    cfg.enable_ee=true;
+     cfg.ee_probability=0.10;
++    cfg.ee_nbins=12;                % ties/merging may reduce actual number
++    cfg.ee_min_ring_size=10;
++    cfg.ee_calibration_start=5001;
++    cfg.ee_calibration_end=7000;
++    cfg.ee_jump_start=8501;         % fill full history 7001:8500
++    cfg.ee_calibration_mode='pairwise'; % 'pooled' = shared calibration
++    cfg.ee_refine_low_energy=false; % legacy six extra low-energy cuts
++    cfg.ee_merge_sparse=true;      % calibration only; pairwise only
++    cfg.ee_min_pilot_donor_count=20;% time entries, NOT effective samples
++    cfg.ee_fixed_edges=[];          % optional common [-Inf ... Inf]
++    cfg.truncation_enable=false;
++    cfg.floor_calibration_start=1001;
++    cfg.floor_calibration_end=4000;
++    cfg.floor_quantiles=[0.2 0.5 0.8];
++    cfg.dis=150;
++    cfg.dis_y=160;
++    cfg.show=1000;
+     cfg.make_plots=true;
+-    cfg.output_dir=fullfile(fileparts(mfilename('fullpath')),'results');
++    cfg.save_history=false;         % MAT output only; runtime history complete
++    cfg.save_csv=true;
++    cfg.run_label='E2_pairwise';
++    cfg.output_dir=fullfile(root,'results');
++    switch cfg.case_name
++        case 'five'
++            cfg.data_file=fullfile(root,'data','five_layer_rayleigh.txt');
++            cfg.Model=[400 600 500 700 900 5 5 5 10];
++        case 'seven'
++            cfg.data_file=fullfile(root,'data','seven_layer_rayleigh.txt');
++            cfg.Model=[400 450 500 550 600 700 900 4 5 5 6 7 6];
++            cfg.depth_max=40;
++            cfg.npt_max=10;
++            cfg.npt_init=3; % starting complexity only; dimension stays variable
++        otherwise
++            error('Config:Case','Use rj_ee_options(''five'') or (''seven'').');
++    end
+ end
+--- baseline/run_self_tests.m
++++ new/run_self_tests.m
+@@ -1,7 +1,18 @@
+ function run_self_tests
+-    root=fileparts(mfilename('fullpath'));
+-    if ~isfile(fullfile(root,'test_rj_mixture.m')), root=fileparts(root); end
+-    addpath(root,'-begin');
+-    test_dim_truncated;
++% No Python/disba/MEX required. Does not start a real inversion.
++    root=fileparts(mfilename('fullpath')); oldpath=path; oldrng=rng;
++    cleanup=onCleanup(@()restore(oldpath,oldrng)); %#ok<NASGU>
++    addpath(root,'-begin'); addpath(fullfile(root,'core'),'-begin');
++    fprintf('EE pairwise project self-tests (no real forward model)\n');
++    test_dim_truncated; % also runs original DIM/v4 contracts
+     test_rj_mixture;
++    test_baseline_rj_regression;
++    test_route_a;
++    test_ee_pairwise;
++    test_ee_configuration;
++    fprintf('\nAll MATLAB self-tests passed. Run check_true_model_forward next.\n');
++    fprintf('These tests do not establish convergence or improved inversion performance.\n');
+ end
++function restore(p,r)
++    path(p); rng(r); clear forward_model_misfit
++end

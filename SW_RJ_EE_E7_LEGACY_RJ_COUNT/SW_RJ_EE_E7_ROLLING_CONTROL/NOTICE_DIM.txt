@@ -1,0 +1,20 @@
+SW_RJ_EE_PAIRWISE, prepared 2026-09-15.
+Baseline: the user's SW_RJ_EE_TUNING, derived in this workspace from the
+supplied v4 surface-wave project and DIM_MATLAB_Core(3).zip.
+Original DIM repository: https://github.com/jeriedel/dim
+
+DIM-inspired ingredients: fixed energy rings, uniform historical-time-entry
+selection and full-history organization. This is an adaptation, not a full
+DIM port or a paper figure reproduction. New pairwise pilot calibration and
+optional sparse-ring merging are project-specific engineering choices.
+Schreck ongoing adaptive quantiles and DIM BSP are not included.
+
+Likelihood-only tempering preserves the existing unheated RJ prior.
+Optional Route A depth proposals and the existing likelihood-floor branch
+are included but disabled by default. The original inversion plotting
+functions are preserved; EE diagnostic figures are updated separately.
+See docs/BASELINE_MANIFEST.json and docs/CHANGES.patch for file differences.
+
+DIM-derived additions are provided under GNU GPL version 3; see LICENSE_DIM.
+Existing source notices are retained. No endorsement, new convergence theorem
+or validated inversion-performance advantage is claimed.

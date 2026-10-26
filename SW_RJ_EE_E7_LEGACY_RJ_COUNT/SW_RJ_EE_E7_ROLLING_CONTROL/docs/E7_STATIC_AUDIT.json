@@ -1,0 +1,12 @@
+{
+  "kind": "source-level E7 audit; not MATLAB execution or convergence evidence",
+  "energy_pilot": "most recent 4000 completed energies",
+  "proposal_archive": "most recent 8000 complete states per chain, strict FIFO",
+  "edge_interval": 2000,
+  "policies": [
+    "continuous through run",
+    "frozen before posterior"
+  ],
+  "reset": "one-time deletion of pre-reset proposal states; current edges retained",
+  "local_kernel": "one mandatory RJ followed by optional supplemental EE"
+}

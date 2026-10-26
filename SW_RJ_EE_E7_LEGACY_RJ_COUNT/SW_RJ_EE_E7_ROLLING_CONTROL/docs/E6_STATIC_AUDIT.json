@@ -1,0 +1,9 @@
+{
+  "kind": "source-level E6 audit; not MATLAB execution or convergence evidence",
+  "pre_reset_pilot": "rolling window",
+  "reset": "one-time candidate deletion; current edges retained",
+  "post_reset_archive": "all completed states, no eviction",
+  "post_reset_pilot": "all energies from reset+1 through current sweep",
+  "edge_updates": "continue through final sweep",
+  "local_kernel": "one mandatory RJ followed by optional supplemental EE"
+}
